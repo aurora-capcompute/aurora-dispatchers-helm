@@ -1,11 +1,11 @@
 {
     "schema_version": 1,
-    "commit": "HEAD",
-    "indexed_at": "2026-06-21T16:20:12Z",
+    "commit": "dbc5071cc9f22f1e21ef0fb8f748e4f43a8112e7",
+    "indexed_at": "2026-06-22T00:15:32Z",
     "project": "home-rob-workspace-cap_aurora-aurora-dispatchers-helm",
-    "nodes": 159,
-    "edges": 579,
-    "original_size": 1638400,
-    "compressed_size": 135422,
-    "compression_level": 9
+    "nodes": 175,
+    "edges": 592,
+    "original_size": 1900544,
+    "compressed_size": 58844,
+    "compression_level": 3
 }
