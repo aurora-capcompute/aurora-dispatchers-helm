@@ -75,6 +75,53 @@ func (Registration) Configure(
 	return nil
 }
 
+func (Registration) IsSubset(name string, parent, child json.RawMessage) error {
+	var parentSettings, childSettings Settings
+	if err := json.Unmarshal(parent, &parentSettings); err != nil {
+		return fmt.Errorf("decode parent settings: %w", err)
+	}
+	if err := json.Unmarshal(child, &childSettings); err != nil {
+		return fmt.Errorf("decode child settings: %w", err)
+	}
+	if len(parentSettings.Namespaces) > 0 {
+		allowed := make(map[string]struct{}, len(parentSettings.Namespaces))
+		for _, ns := range parentSettings.Namespaces {
+			allowed[ns] = struct{}{}
+		}
+		for _, ns := range childSettings.Namespaces {
+			if _, ok := allowed[ns]; !ok {
+				return fmt.Errorf("child namespace %q is not in parent's allowed namespaces", ns)
+			}
+		}
+		if len(childSettings.Namespaces) == 0 {
+			return fmt.Errorf("child must specify namespaces when parent restricts them")
+		}
+	}
+	if len(parentSettings.Charts) > 0 {
+		for _, childChart := range childSettings.Charts {
+			if !chartAllowed(childChart, parentSettings.Charts) {
+				return fmt.Errorf("child chart %q is not in parent's allowed charts", childChart)
+			}
+		}
+		if len(childSettings.Charts) == 0 {
+			return fmt.Errorf("child must specify charts when parent restricts them")
+		}
+	}
+	return nil
+}
+
+func chartAllowed(chart string, allowed []string) bool {
+	for _, a := range allowed {
+		if a == chart {
+			return true
+		}
+		if strings.HasSuffix(a, "/*") && strings.HasPrefix(chart, strings.TrimSuffix(a, "*")) {
+			return true
+		}
+	}
+	return false
+}
+
 func findOrCreateHandler(config *builtin.Config, settings Settings) (*Handler, error) {
 	connection := connectionSettings{
 		binary:     settings.HelmBinary,
