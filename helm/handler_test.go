@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/aurora-capcompute/aurora-dispatchers/resolution"
 	"github.com/aurora-capcompute/capcompute/dispatcher"
 )
 
@@ -51,7 +50,7 @@ func TestReadOperationReturnsImmediately(t *testing.T) {
 	outcome, err := handler.DispatchCall(context.Background(), dispatcher.Call{
 		Name: "helm.list",
 		Args: json.RawMessage(`{}`),
-	})
+	}, dispatcher.Authorization{})
 	if err != nil {
 		t.Fatalf("dispatch list: %v", err)
 	}
@@ -75,7 +74,7 @@ func TestMutationYieldsUntilApproved(t *testing.T) {
 		Args: json.RawMessage(`{"release":"api","chart":"bitnami/nginx","namespace":"default"}`),
 	}
 
-	outcome, err := handler.DispatchCall(context.Background(), call)
+	outcome, err := handler.DispatchCall(context.Background(), call, dispatcher.Authorization{})
 	if err != nil {
 		t.Fatalf("dispatch install: %v", err)
 	}
@@ -86,8 +85,7 @@ func TestMutationYieldsUntilApproved(t *testing.T) {
 		t.Fatalf("install ran before approval")
 	}
 
-	ctx := resolution.WithContext(context.Background(), resolution.Resolution{Decision: resolution.Approved})
-	outcome, err = handler.DispatchCall(ctx, call)
+	outcome, err = handler.DispatchCall(context.Background(), call, dispatcher.Authorization{Decision: dispatcher.Approved})
 	if err != nil {
 		t.Fatalf("dispatch approved install: %v", err)
 	}
@@ -117,7 +115,7 @@ func TestPoliciesRejectDisallowedScope(t *testing.T) {
 			outcome, err := handler.DispatchCall(context.Background(), dispatcher.Call{
 				Name: "helm.template",
 				Args: json.RawMessage(args),
-			})
+			}, dispatcher.Authorization{})
 			if err != nil {
 				t.Fatalf("dispatch template: %v", err)
 			}

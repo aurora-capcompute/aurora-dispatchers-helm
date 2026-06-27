@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/aurora-capcompute/aurora-dispatchers/builtin"
-	"github.com/aurora-capcompute/aurora-dispatchers/resolution"
 	"github.com/aurora-capcompute/capcompute/dispatcher"
 )
 
@@ -46,30 +45,30 @@ func (h *Handler) Handles(name string) bool {
 	return ok
 }
 
-func (h *Handler) DispatchCall(ctx context.Context, call dispatcher.Call) (dispatcher.Outcome, error) {
+func (h *Handler) DispatchCall(ctx context.Context, call dispatcher.Call, auth dispatcher.Authorization) (dispatcher.Outcome, error) {
 	capability, ok := h.capabilities[call.Name]
 	if !ok {
-		return dispatcher.Failed("unknown helm call: " + call.Name), nil
+		return dispatcher.Fail("unknown helm call: " + call.Name), nil
 	}
 	switch call.Name {
 	case "helm.list":
 		return h.dispatchList(ctx, call, capability)
 	case "helm.status":
-		return h.dispatchStatus(ctx, call, capability)
+		return h.dispatchStatus(ctx, call, capability, auth)
 	case "helm.get_values":
-		return h.dispatchGetValues(ctx, call, capability)
+		return h.dispatchGetValues(ctx, call, capability, auth)
 	case "helm.install":
-		return h.dispatchInstall(ctx, call, capability)
+		return h.dispatchInstall(ctx, call, capability, auth)
 	case "helm.upgrade":
-		return h.dispatchUpgrade(ctx, call, capability)
+		return h.dispatchUpgrade(ctx, call, capability, auth)
 	case "helm.rollback":
-		return h.dispatchRollback(ctx, call, capability)
+		return h.dispatchRollback(ctx, call, capability, auth)
 	case "helm.uninstall":
-		return h.dispatchUninstall(ctx, call, capability)
+		return h.dispatchUninstall(ctx, call, capability, auth)
 	case "helm.template":
-		return h.dispatchTemplate(ctx, call, capability)
+		return h.dispatchTemplate(ctx, call, capability, auth)
 	default:
-		return dispatcher.Failed("unsupported helm operation: " + call.Name), nil
+		return dispatcher.Fail("unsupported helm operation: " + call.Name), nil
 	}
 }
 
@@ -79,49 +78,49 @@ func (h *Handler) dispatchList(ctx context.Context, call dispatcher.Call, cap ca
 		return *outcome, nil
 	}
 	if err := cap.policy.checkNamespace(req.Namespace); err != nil {
-		return dispatcher.Failed(err.Error()), nil
+		return dispatcher.Fail(err.Error()), nil
 	}
 	data, err := h.client.List(ctx, req)
 	return jsonClientResult(ctx, data, err)
 }
 
-func (h *Handler) dispatchStatus(ctx context.Context, call dispatcher.Call, cap capabilityConfig) (dispatcher.Outcome, error) {
+func (h *Handler) dispatchStatus(ctx context.Context, call dispatcher.Call, cap capabilityConfig, auth dispatcher.Authorization) (dispatcher.Outcome, error) {
 	var req StatusRequest
 	if outcome := decode(call, &req); outcome != nil {
 		return *outcome, nil
 	}
 	if req.Release == "" {
-		return dispatcher.Failed("release is required"), nil
+		return dispatcher.Fail("release is required"), nil
 	}
 	if err := cap.policy.checkNamespace(req.Namespace); err != nil {
-		return dispatcher.Failed(err.Error()), nil
+		return dispatcher.Fail(err.Error()), nil
 	}
-	if outcome := approval(ctx, cap, fmt.Sprintf("helm.status %s in %s", req.Release, req.Namespace)); outcome != nil {
+	if outcome := approval(auth, cap, fmt.Sprintf("helm.status %s in %s", req.Release, req.Namespace)); outcome != nil {
 		return *outcome, nil
 	}
 	data, err := h.client.Status(ctx, req)
 	return jsonClientResult(ctx, data, err)
 }
 
-func (h *Handler) dispatchGetValues(ctx context.Context, call dispatcher.Call, cap capabilityConfig) (dispatcher.Outcome, error) {
+func (h *Handler) dispatchGetValues(ctx context.Context, call dispatcher.Call, cap capabilityConfig, auth dispatcher.Authorization) (dispatcher.Outcome, error) {
 	var req GetValuesRequest
 	if outcome := decode(call, &req); outcome != nil {
 		return *outcome, nil
 	}
 	if req.Release == "" {
-		return dispatcher.Failed("release is required"), nil
+		return dispatcher.Fail("release is required"), nil
 	}
 	if err := cap.policy.checkNamespace(req.Namespace); err != nil {
-		return dispatcher.Failed(err.Error()), nil
+		return dispatcher.Fail(err.Error()), nil
 	}
-	if outcome := approval(ctx, cap, fmt.Sprintf("helm.get_values %s in %s", req.Release, req.Namespace)); outcome != nil {
+	if outcome := approval(auth, cap, fmt.Sprintf("helm.get_values %s in %s", req.Release, req.Namespace)); outcome != nil {
 		return *outcome, nil
 	}
 	data, err := h.client.GetValues(ctx, req)
 	return jsonClientResult(ctx, data, err)
 }
 
-func (h *Handler) dispatchInstall(ctx context.Context, call dispatcher.Call, cap capabilityConfig) (dispatcher.Outcome, error) {
+func (h *Handler) dispatchInstall(ctx context.Context, call dispatcher.Call, cap capabilityConfig, auth dispatcher.Authorization) (dispatcher.Outcome, error) {
 	var req InstallRequest
 	if outcome := decode(call, &req); outcome != nil {
 		return *outcome, nil
@@ -129,14 +128,14 @@ func (h *Handler) dispatchInstall(ctx context.Context, call dispatcher.Call, cap
 	if outcome := validateReleaseChart(cap, req.Release, req.Chart, req.Namespace); outcome != nil {
 		return *outcome, nil
 	}
-	if outcome := approval(ctx, cap, fmt.Sprintf("helm.install %s from %s in %s", req.Release, req.Chart, req.Namespace)); outcome != nil {
+	if outcome := approval(auth, cap, fmt.Sprintf("helm.install %s from %s in %s", req.Release, req.Chart, req.Namespace)); outcome != nil {
 		return *outcome, nil
 	}
 	data, err := h.client.Install(ctx, req)
 	return jsonClientResult(ctx, data, err)
 }
 
-func (h *Handler) dispatchUpgrade(ctx context.Context, call dispatcher.Call, cap capabilityConfig) (dispatcher.Outcome, error) {
+func (h *Handler) dispatchUpgrade(ctx context.Context, call dispatcher.Call, cap capabilityConfig, auth dispatcher.Authorization) (dispatcher.Outcome, error) {
 	var req UpgradeRequest
 	if outcome := decode(call, &req); outcome != nil {
 		return *outcome, nil
@@ -144,50 +143,50 @@ func (h *Handler) dispatchUpgrade(ctx context.Context, call dispatcher.Call, cap
 	if outcome := validateReleaseChart(cap, req.Release, req.Chart, req.Namespace); outcome != nil {
 		return *outcome, nil
 	}
-	if outcome := approval(ctx, cap, fmt.Sprintf("helm.upgrade %s from %s in %s", req.Release, req.Chart, req.Namespace)); outcome != nil {
+	if outcome := approval(auth, cap, fmt.Sprintf("helm.upgrade %s from %s in %s", req.Release, req.Chart, req.Namespace)); outcome != nil {
 		return *outcome, nil
 	}
 	data, err := h.client.Upgrade(ctx, req)
 	return jsonClientResult(ctx, data, err)
 }
 
-func (h *Handler) dispatchRollback(ctx context.Context, call dispatcher.Call, cap capabilityConfig) (dispatcher.Outcome, error) {
+func (h *Handler) dispatchRollback(ctx context.Context, call dispatcher.Call, cap capabilityConfig, auth dispatcher.Authorization) (dispatcher.Outcome, error) {
 	var req RollbackRequest
 	if outcome := decode(call, &req); outcome != nil {
 		return *outcome, nil
 	}
 	if req.Release == "" || req.Revision < 1 {
-		return dispatcher.Failed("release and a positive revision are required"), nil
+		return dispatcher.Fail("release and a positive revision are required"), nil
 	}
 	if err := cap.policy.checkNamespace(req.Namespace); err != nil {
-		return dispatcher.Failed(err.Error()), nil
+		return dispatcher.Fail(err.Error()), nil
 	}
-	if outcome := approval(ctx, cap, fmt.Sprintf("helm.rollback %s to revision %d in %s", req.Release, req.Revision, req.Namespace)); outcome != nil {
+	if outcome := approval(auth, cap, fmt.Sprintf("helm.rollback %s to revision %d in %s", req.Release, req.Revision, req.Namespace)); outcome != nil {
 		return *outcome, nil
 	}
 	output, err := h.client.Rollback(ctx, req)
 	return textClientResult(ctx, output, err)
 }
 
-func (h *Handler) dispatchUninstall(ctx context.Context, call dispatcher.Call, cap capabilityConfig) (dispatcher.Outcome, error) {
+func (h *Handler) dispatchUninstall(ctx context.Context, call dispatcher.Call, cap capabilityConfig, auth dispatcher.Authorization) (dispatcher.Outcome, error) {
 	var req UninstallRequest
 	if outcome := decode(call, &req); outcome != nil {
 		return *outcome, nil
 	}
 	if req.Release == "" {
-		return dispatcher.Failed("release is required"), nil
+		return dispatcher.Fail("release is required"), nil
 	}
 	if err := cap.policy.checkNamespace(req.Namespace); err != nil {
-		return dispatcher.Failed(err.Error()), nil
+		return dispatcher.Fail(err.Error()), nil
 	}
-	if outcome := approval(ctx, cap, fmt.Sprintf("helm.uninstall %s in %s", req.Release, req.Namespace)); outcome != nil {
+	if outcome := approval(auth, cap, fmt.Sprintf("helm.uninstall %s in %s", req.Release, req.Namespace)); outcome != nil {
 		return *outcome, nil
 	}
 	output, err := h.client.Uninstall(ctx, req)
 	return textClientResult(ctx, output, err)
 }
 
-func (h *Handler) dispatchTemplate(ctx context.Context, call dispatcher.Call, cap capabilityConfig) (dispatcher.Outcome, error) {
+func (h *Handler) dispatchTemplate(ctx context.Context, call dispatcher.Call, cap capabilityConfig, auth dispatcher.Authorization) (dispatcher.Outcome, error) {
 	var req TemplateRequest
 	if outcome := decode(call, &req); outcome != nil {
 		return *outcome, nil
@@ -195,7 +194,7 @@ func (h *Handler) dispatchTemplate(ctx context.Context, call dispatcher.Call, ca
 	if outcome := validateReleaseChart(cap, req.Release, req.Chart, req.Namespace); outcome != nil {
 		return *outcome, nil
 	}
-	if outcome := approval(ctx, cap, fmt.Sprintf("helm.template %s from %s in %s", req.Release, req.Chart, req.Namespace)); outcome != nil {
+	if outcome := approval(auth, cap, fmt.Sprintf("helm.template %s from %s in %s", req.Release, req.Chart, req.Namespace)); outcome != nil {
 		return *outcome, nil
 	}
 	output, err := h.client.Template(ctx, req)
@@ -204,7 +203,7 @@ func (h *Handler) dispatchTemplate(ctx context.Context, call dispatcher.Call, ca
 
 func decode(call dispatcher.Call, target any) *dispatcher.Outcome {
 	if err := json.Unmarshal(call.Args, target); err != nil {
-		outcome := dispatcher.Failed(fmt.Sprintf("decode %s: %v", call.Name, err))
+		outcome := dispatcher.Fail(fmt.Sprintf("decode %s: %v", call.Name, err))
 		return &outcome
 	}
 	return nil
@@ -212,25 +211,25 @@ func decode(call dispatcher.Call, target any) *dispatcher.Outcome {
 
 func validateReleaseChart(cap capabilityConfig, release, chart, namespace string) *dispatcher.Outcome {
 	if release == "" || chart == "" {
-		outcome := dispatcher.Failed("release and chart are required")
+		outcome := dispatcher.Fail("release and chart are required")
 		return &outcome
 	}
 	if err := cap.policy.checkNamespace(namespace); err != nil {
-		outcome := dispatcher.Failed(err.Error())
+		outcome := dispatcher.Fail(err.Error())
 		return &outcome
 	}
 	if err := cap.policy.checkChart(chart); err != nil {
-		outcome := dispatcher.Failed(err.Error())
+		outcome := dispatcher.Fail(err.Error())
 		return &outcome
 	}
 	return nil
 }
 
-func approval(ctx context.Context, cap capabilityConfig, summary string) *dispatcher.Outcome {
+func approval(auth dispatcher.Authorization, cap capabilityConfig, summary string) *dispatcher.Outcome {
 	if !cap.requireApproval {
 		return nil
 	}
-	if resolved, ok := resolution.FromContext(ctx); ok && resolved.Decision == resolution.Approved {
+	if auth.Decision == dispatcher.Approved {
 		return nil
 	}
 	outcome := dispatcher.Yield("Approve: " + strings.TrimSpace(summary))
@@ -255,7 +254,7 @@ func clientError(ctx context.Context, err error) (dispatcher.Outcome, error) {
 	if ctx.Err() != nil {
 		return dispatcher.Outcome{}, ctx.Err()
 	}
-	return dispatcher.Failed(err.Error()), nil
+	return dispatcher.Fail(err.Error()), nil
 }
 
 func marshalResult(value any) (dispatcher.Outcome, error) {
