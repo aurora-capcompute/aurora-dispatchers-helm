@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"strings"
 
-	"aurora-dispatchers/builtin"
-	"aurora-dispatchers/resolution"
-	"capcompute/dispatcher"
+	"github.com/aurora-capcompute/aurora-dispatchers/builtin"
+	"github.com/aurora-capcompute/aurora-dispatchers/resolution"
+	"github.com/aurora-capcompute/capcompute/dispatcher"
 )
 
 var _ builtin.Handler = (*Handler)(nil)

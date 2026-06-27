@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	"aurora-dispatchers/resolution"
-	"capcompute/dispatcher"
+	"github.com/aurora-capcompute/aurora-dispatchers/resolution"
+	"github.com/aurora-capcompute/capcompute/dispatcher"
 )
 
 type mockClient struct {
