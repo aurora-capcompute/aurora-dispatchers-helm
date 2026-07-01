@@ -42,14 +42,28 @@ func (m *mockClient) Template(context.Context, TemplateRequest) (string, error) 
 	return "kind: Deployment", nil
 }
 
+// handlerWithMock builds a Handler holding one helm tool bound to a mock client.
+func handlerWithMock(name string, client Client, settings Settings) *Handler {
+	return &Handler{
+		client: client,
+		capabilities: map[string]capabilityConfig{
+			name: {
+				policy:          newPermissionPolicy(settings.Permissions),
+				requireApproval: settings.RequireApproval,
+			},
+		},
+	}
+}
+
+var anyVerb = Settings{Permissions: []Permission{{Verb: "*"}}}
+
 func TestReadOperationReturnsImmediately(t *testing.T) {
 	client := &mockClient{}
-	handler := NewHandler(client)
-	handler.AddCapability("helm.list", Settings{})
+	handler := handlerWithMock("helmTool", client, anyVerb)
 
 	outcome, err := handler.DispatchCall(context.Background(), dispatcher.Call{
-		Name: "helm.list",
-		Args: json.RawMessage(`{}`),
+		Name: "helmTool",
+		Args: json.RawMessage(`{"verb":"list"}`),
 	}, dispatcher.Authorization{})
 	if err != nil {
 		t.Fatalf("dispatch list: %v", err)
@@ -64,14 +78,12 @@ func TestReadOperationReturnsImmediately(t *testing.T) {
 
 func TestMutationYieldsUntilApproved(t *testing.T) {
 	client := &mockClient{}
-	handler := NewHandler(client)
-	handler.AddCapability("helm.install", Settings{
-		Namespaces: []string{"default"},
-		Charts:     []string{"bitnami/*"},
+	handler := handlerWithMock("helmTool", client, Settings{
+		Permissions: []Permission{{Verb: "install", Resource: "bitnami/*", Namespace: "default"}},
 	})
 	call := dispatcher.Call{
-		Name: "helm.install",
-		Args: json.RawMessage(`{"release":"api","chart":"bitnami/nginx","namespace":"default"}`),
+		Name: "helmTool",
+		Args: json.RawMessage(`{"verb":"install","release":"api","chart":"bitnami/nginx","namespace":"default"}`),
 	}
 
 	outcome, err := handler.DispatchCall(context.Background(), call, dispatcher.Authorization{})
@@ -97,23 +109,21 @@ func TestMutationYieldsUntilApproved(t *testing.T) {
 	}
 }
 
-func TestPoliciesRejectDisallowedScope(t *testing.T) {
+func TestPermissionsRejectDisallowedScope(t *testing.T) {
 	client := &mockClient{}
 	disabled := false
-	handler := NewHandler(client)
-	handler.AddCapability("helm.template", Settings{
-		Namespaces:      []string{"default"},
-		Charts:          []string{"internal/*"},
+	handler := handlerWithMock("helmTool", client, Settings{
+		Permissions:     []Permission{{Verb: "template", Resource: "internal/*", Namespace: "default"}},
 		RequireApproval: &disabled,
 	})
 
 	for name, args := range map[string]string{
-		"namespace": `{"release":"api","chart":"internal/api","namespace":"production"}`,
-		"chart":     `{"release":"api","chart":"bitnami/nginx","namespace":"default"}`,
+		"namespace": `{"verb":"template","release":"api","chart":"internal/api","namespace":"production"}`,
+		"chart":     `{"verb":"template","release":"api","chart":"bitnami/nginx","namespace":"default"}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			outcome, err := handler.DispatchCall(context.Background(), dispatcher.Call{
-				Name: "helm.template",
+				Name: "helmTool",
 				Args: json.RawMessage(args),
 			}, dispatcher.Authorization{})
 			if err != nil {

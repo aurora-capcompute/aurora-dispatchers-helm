@@ -1,84 +1,109 @@
 package helm
 
 import (
-	"fmt"
-	"sort"
 	"strings"
 )
 
-type Settings struct {
-	HelmBinary      string   `json:"helm_binary,omitempty"`
-	Kubeconfig      string   `json:"kubeconfig,omitempty"`
-	Context         string   `json:"context,omitempty"`
-	Namespaces      []string `json:"namespaces,omitempty"`
-	Charts          []string `json:"charts,omitempty"`
-	RequireApproval *bool    `json:"require_approval,omitempty"`
+// Permission is one allowlisted operation: a verb on a chart in a namespace.
+// Empty or "*" in any field means "any". `Resource` is matched case-insensitively
+// against the chart name for chart-bearing verbs (install/upgrade/template); it is
+// ignored for release-only verbs.
+type Permission struct {
+	Resource  string `json:"resource,omitempty"`
+	Verb      string `json:"verb,omitempty"`
+	Namespace string `json:"namespace,omitempty"`
 }
 
-func isMutating(name string) bool {
-	switch name {
-	case "helm.install", "helm.upgrade", "helm.rollback", "helm.uninstall":
+type Settings struct {
+	HelmBinary      string       `json:"helm_binary,omitempty"`
+	Kubeconfig      string       `json:"kubeconfig,omitempty"`
+	Context         string       `json:"context,omitempty"`
+	Permissions     []Permission `json:"permissions"`
+	RequireApproval *bool        `json:"require_approval,omitempty"`
+}
+
+// knownVerbs are the operations a helm tool can expose, in published order.
+var knownVerbs = []string{"list", "status", "get_values", "install", "upgrade", "rollback", "uninstall", "template"}
+
+func isMutatingVerb(verb string) bool {
+	switch verb {
+	case "install", "upgrade", "rollback", "uninstall":
 		return true
 	default:
 		return false
 	}
 }
 
-func requiresApproval(name string, settings Settings) bool {
-	if settings.RequireApproval != nil {
-		return *settings.RequireApproval
+// requiresApproval reports whether a verb needs human approval. An explicit
+// per-tool override wins; otherwise mutating verbs require approval.
+func requiresApproval(verb string, override *bool) bool {
+	if override != nil {
+		return *override
 	}
-	return isMutating(name)
+	return isMutatingVerb(verb)
 }
 
-type policy struct {
-	namespaces map[string]struct{}
-	charts     []string
+type permissionPolicy struct {
+	perms []Permission
 }
 
-func newPolicy(settings Settings) policy {
-	namespaces := make(map[string]struct{}, len(settings.Namespaces))
-	for _, namespace := range settings.Namespaces {
-		if namespace = strings.TrimSpace(namespace); namespace != "" {
-			namespaces[namespace] = struct{}{}
+func newPermissionPolicy(perms []Permission) permissionPolicy {
+	return permissionPolicy{perms: perms}
+}
+
+// allowsChart reports whether a chart-bearing verb is granted for (chart, namespace).
+func (p permissionPolicy) allowsChart(verb, chart, namespace string) bool {
+	for _, perm := range p.perms {
+		if matchToken(perm.Verb, verb) && matchToken(perm.Resource, chart) && matchToken(perm.Namespace, namespace) {
+			return true
 		}
 	}
-	return policy{namespaces: namespaces, charts: append([]string(nil), settings.Charts...)}
+	return false
 }
 
-func (p policy) checkNamespace(namespace string) error {
-	if len(p.namespaces) == 0 {
-		return nil
-	}
-	if namespace == "" {
-		return fmt.Errorf("namespace is required (allowed: %s)", strings.Join(p.namespaceList(), ", "))
-	}
-	if _, ok := p.namespaces[namespace]; !ok {
-		return fmt.Errorf("namespace %q is not allowed (allowed: %s)", namespace, strings.Join(p.namespaceList(), ", "))
-	}
-	return nil
-}
-
-func (p policy) checkChart(chart string) error {
-	if len(p.charts) == 0 {
-		return nil
-	}
-	for _, allowed := range p.charts {
-		if allowed == chart {
-			return nil
-		}
-		if strings.HasSuffix(allowed, "/*") && strings.HasPrefix(chart, strings.TrimSuffix(allowed, "*")) {
-			return nil
+// allowsRelease reports whether a release-only verb is granted in a namespace.
+// The resource (chart) dimension is not applicable and is ignored.
+func (p permissionPolicy) allowsRelease(verb, namespace string) bool {
+	for _, perm := range p.perms {
+		if matchToken(perm.Verb, verb) && matchToken(perm.Namespace, namespace) {
+			return true
 		}
 	}
-	return fmt.Errorf("chart %q is not allowed (allowed: %s)", chart, strings.Join(p.charts, ", "))
+	return false
 }
 
-func (p policy) namespaceList() []string {
-	names := make([]string, 0, len(p.namespaces))
-	for namespace := range p.namespaces {
-		names = append(names, namespace)
+// permittedVerbs returns the known verbs this policy grants, in published order.
+// A wildcard (empty or "*") verb grants all known verbs.
+func (p permissionPolicy) permittedVerbs() []string {
+	wildcard := false
+	granted := make(map[string]bool, len(p.perms))
+	for _, perm := range p.perms {
+		v := strings.ToLower(strings.TrimSpace(perm.Verb))
+		if v == "" || v == "*" {
+			wildcard = true
+			break
+		}
+		granted[v] = true
 	}
-	sort.Strings(names)
-	return names
+	out := make([]string, 0, len(knownVerbs))
+	for _, v := range knownVerbs {
+		if wildcard || granted[v] {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// matchToken matches an allowlist token against an actual value. Empty or "*"
+// matches anything; a trailing "*" is a case-insensitive prefix glob (e.g.
+// "bitnami/*"); otherwise the comparison is exact and case-insensitive.
+func matchToken(allowed, actual string) bool {
+	allowed = strings.TrimSpace(allowed)
+	if allowed == "" || allowed == "*" {
+		return true
+	}
+	if prefix, ok := strings.CutSuffix(allowed, "*"); ok {
+		return strings.HasPrefix(strings.ToLower(actual), strings.ToLower(prefix))
+	}
+	return strings.EqualFold(allowed, actual)
 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sort"
 	"strings"
 
 	"github.com/aurora-capcompute/aurora-dispatchers/builtin"
@@ -12,28 +11,14 @@ import (
 	"github.com/aurora-capcompute/capcompute/dispatcher"
 )
 
-var validOperations = map[string]struct{}{
-	"helm.list":       {},
-	"helm.status":     {},
-	"helm.get_values": {},
-	"helm.install":    {},
-	"helm.upgrade":    {},
-	"helm.rollback":   {},
-	"helm.uninstall":  {},
-	"helm.template":   {},
-}
+// ToolType is the manifest `type` for a Helm tool.
+const ToolType = "core.helm"
 
 type Registration struct{}
 
-func (Registration) Matches(name string) bool {
-	_, ok := validOperations[name]
-	return ok
-}
+func (Registration) Matches(toolType string) bool { return toolType == ToolType }
 
-func (Registration) Normalize(name string, raw json.RawMessage) (json.RawMessage, error) {
-	if _, ok := validOperations[name]; !ok {
-		return nil, fmt.Errorf("unsupported helm operation %q", name)
-	}
+func (Registration) Normalize(_ string, raw json.RawMessage) (json.RawMessage, error) {
 	var settings Settings
 	if len(raw) > 0 {
 		if err := json.Unmarshal(raw, &settings); err != nil {
@@ -46,8 +31,14 @@ func (Registration) Normalize(name string, raw json.RawMessage) (json.RawMessage
 	}
 	settings.Kubeconfig = strings.TrimSpace(settings.Kubeconfig)
 	settings.Context = strings.TrimSpace(settings.Context)
-	settings.Namespaces = cleanList(settings.Namespaces)
-	settings.Charts = cleanList(settings.Charts)
+	if len(settings.Permissions) == 0 {
+		return nil, fmt.Errorf("permissions must contain at least one {resource, verb, namespace}")
+	}
+	for i := range settings.Permissions {
+		settings.Permissions[i].Resource = strings.TrimSpace(settings.Permissions[i].Resource)
+		settings.Permissions[i].Verb = strings.ToLower(strings.TrimSpace(settings.Permissions[i].Verb))
+		settings.Permissions[i].Namespace = strings.TrimSpace(settings.Permissions[i].Namespace)
+	}
 	return json.Marshal(settings)
 }
 
@@ -73,53 +64,6 @@ func (Registration) Configure(
 	handler.AddCapability(name, settings)
 	config.Capabilities = append(config.Capabilities, capabilityFor(name, settings))
 	return nil
-}
-
-func (Registration) IsSubset(name string, parent, child json.RawMessage) error {
-	var parentSettings, childSettings Settings
-	if err := json.Unmarshal(parent, &parentSettings); err != nil {
-		return fmt.Errorf("decode parent settings: %w", err)
-	}
-	if err := json.Unmarshal(child, &childSettings); err != nil {
-		return fmt.Errorf("decode child settings: %w", err)
-	}
-	if len(parentSettings.Namespaces) > 0 {
-		allowed := make(map[string]struct{}, len(parentSettings.Namespaces))
-		for _, ns := range parentSettings.Namespaces {
-			allowed[ns] = struct{}{}
-		}
-		for _, ns := range childSettings.Namespaces {
-			if _, ok := allowed[ns]; !ok {
-				return fmt.Errorf("child namespace %q is not in parent's allowed namespaces", ns)
-			}
-		}
-		if len(childSettings.Namespaces) == 0 {
-			return fmt.Errorf("child must specify namespaces when parent restricts them")
-		}
-	}
-	if len(parentSettings.Charts) > 0 {
-		for _, childChart := range childSettings.Charts {
-			if !chartAllowed(childChart, parentSettings.Charts) {
-				return fmt.Errorf("child chart %q is not in parent's allowed charts", childChart)
-			}
-		}
-		if len(childSettings.Charts) == 0 {
-			return fmt.Errorf("child must specify charts when parent restricts them")
-		}
-	}
-	return nil
-}
-
-func chartAllowed(chart string, allowed []string) bool {
-	for _, a := range allowed {
-		if a == chart {
-			return true
-		}
-		if strings.HasSuffix(a, "/*") && strings.HasPrefix(chart, strings.TrimSuffix(a, "*")) {
-			return true
-		}
-	}
-	return false
 }
 
 func findOrCreateHandler(config *builtin.Config, settings Settings) (*Handler, error) {
@@ -173,64 +117,57 @@ func (c failedClient) Template(context.Context, TemplateRequest) (string, error)
 	return "", c.err
 }
 
+// capabilityFor publishes one tool capability named by the local tool name. The
+// input schema is a discriminated union over the verbs the permissions grant.
 func capabilityFor(name string, settings Settings) dispatcher.Capability {
-	scope := "all namespaces and charts"
-	if len(settings.Namespaces) > 0 || len(settings.Charts) > 0 {
-		scope = fmt.Sprintf("namespaces: %s; charts: %s", displayList(settings.Namespaces), displayList(settings.Charts))
+	verbs := newPermissionPolicy(settings.Permissions).permittedVerbs()
+	branches := make([]json.RawMessage, 0, len(verbs))
+	for _, v := range verbs {
+		branches = append(branches, verbSchemas[v])
+	}
+	schema := json.RawMessage(`{"type":"object"}`)
+	if len(branches) > 0 {
+		oneOf, _ := json.Marshal(map[string]any{"oneOf": branches})
+		schema = oneOf
 	}
 	approval := ""
-	if requiresApproval(name, settings) {
-		approval = " Requires human approval."
-	}
-	descriptions := map[string]string{
-		"helm.list":       "List Helm releases.",
-		"helm.status":     "Get the status of a Helm release.",
-		"helm.get_values": "Get values for a Helm release.",
-		"helm.install":    "Install a Helm release.",
-		"helm.upgrade":    "Upgrade a Helm release.",
-		"helm.rollback":   "Roll back a Helm release to a prior revision.",
-		"helm.uninstall":  "Uninstall a Helm release.",
-		"helm.template":   "Render a Helm chart locally.",
+	if settings.RequireApproval != nil && *settings.RequireApproval {
+		approval = " All operations require human approval."
 	}
 	return dispatcher.Capability{
 		Name:        name,
-		Description: fmt.Sprintf("%s Scope: %s.%s", descriptions[name], scope, approval),
-		InputSchema: schemas[name],
+		Description: fmt.Sprintf("Helm operations selected by `verb` (%s). Allowed: %s.%s", strings.Join(verbs, ", "), describePermissions(settings.Permissions), approval),
+		InputSchema: schema,
 	}
 }
 
-var schemas = map[string]json.RawMessage{
-	"helm.list":       json.RawMessage(`{"type":"object","properties":{"namespace":{"type":"string"},"filter":{"type":"string"}},"additionalProperties":false}`),
-	"helm.status":     json.RawMessage(`{"type":"object","properties":{"release":{"type":"string"},"namespace":{"type":"string"}},"required":["release"],"additionalProperties":false}`),
-	"helm.get_values": json.RawMessage(`{"type":"object","properties":{"release":{"type":"string"},"namespace":{"type":"string"},"all":{"type":"boolean"}},"required":["release"],"additionalProperties":false}`),
-	"helm.install":    json.RawMessage(`{"type":"object","properties":{"release":{"type":"string"},"chart":{"type":"string"},"namespace":{"type":"string"},"version":{"type":"string"},"values":{"type":"object"},"create_namespace":{"type":"boolean"},"wait":{"type":"boolean"},"timeout":{"type":"string"}},"required":["release","chart"],"additionalProperties":false}`),
-	"helm.upgrade":    json.RawMessage(`{"type":"object","properties":{"release":{"type":"string"},"chart":{"type":"string"},"namespace":{"type":"string"},"version":{"type":"string"},"values":{"type":"object"},"install":{"type":"boolean"},"wait":{"type":"boolean"},"timeout":{"type":"string"}},"required":["release","chart"],"additionalProperties":false}`),
-	"helm.rollback":   json.RawMessage(`{"type":"object","properties":{"release":{"type":"string"},"revision":{"type":"integer","minimum":1},"namespace":{"type":"string"},"wait":{"type":"boolean"},"timeout":{"type":"string"}},"required":["release","revision"],"additionalProperties":false}`),
-	"helm.uninstall":  json.RawMessage(`{"type":"object","properties":{"release":{"type":"string"},"namespace":{"type":"string"},"keep_history":{"type":"boolean"},"wait":{"type":"boolean"},"timeout":{"type":"string"}},"required":["release"],"additionalProperties":false}`),
-	"helm.template":   json.RawMessage(`{"type":"object","properties":{"release":{"type":"string"},"chart":{"type":"string"},"namespace":{"type":"string"},"version":{"type":"string"},"values":{"type":"object"},"include_crds":{"type":"boolean"}},"required":["release","chart"],"additionalProperties":false}`),
-}
-
-func cleanList(values []string) []string {
-	seen := make(map[string]struct{}, len(values))
-	cleaned := make([]string, 0, len(values))
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value == "" {
-			continue
+func describePermissions(perms []Permission) string {
+	parts := make([]string, 0, len(perms))
+	for _, p := range perms {
+		resource, verb, ns := p.Resource, p.Verb, p.Namespace
+		if resource == "" {
+			resource = "*"
 		}
-		if _, ok := seen[value]; ok {
-			continue
+		if verb == "" {
+			verb = "*"
 		}
-		seen[value] = struct{}{}
-		cleaned = append(cleaned, value)
+		if ns == "" {
+			ns = "*"
+		}
+		parts = append(parts, fmt.Sprintf("%s %s in %s", verb, resource, ns))
 	}
-	sort.Strings(cleaned)
-	return cleaned
+	return strings.Join(parts, "; ")
 }
 
-func displayList(values []string) string {
-	if len(values) == 0 {
-		return "all"
-	}
-	return strings.Join(values, ", ")
+// verbSchemas are the per-verb branches of the union input schema. Each carries
+// a `verb` discriminator const plus that verb's operation fields.
+var verbSchemas = map[string]json.RawMessage{
+	"list":       json.RawMessage(`{"type":"object","properties":{"verb":{"const":"list"},"namespace":{"type":"string"},"filter":{"type":"string"}},"required":["verb"],"additionalProperties":false}`),
+	"status":     json.RawMessage(`{"type":"object","properties":{"verb":{"const":"status"},"release":{"type":"string"},"namespace":{"type":"string"}},"required":["verb","release"],"additionalProperties":false}`),
+	"get_values": json.RawMessage(`{"type":"object","properties":{"verb":{"const":"get_values"},"release":{"type":"string"},"namespace":{"type":"string"},"all":{"type":"boolean"}},"required":["verb","release"],"additionalProperties":false}`),
+	"install":    json.RawMessage(`{"type":"object","properties":{"verb":{"const":"install"},"release":{"type":"string"},"chart":{"type":"string"},"namespace":{"type":"string"},"version":{"type":"string"},"values":{"type":"object"},"create_namespace":{"type":"boolean"},"wait":{"type":"boolean"},"timeout":{"type":"string"}},"required":["verb","release","chart"],"additionalProperties":false}`),
+	"upgrade":    json.RawMessage(`{"type":"object","properties":{"verb":{"const":"upgrade"},"release":{"type":"string"},"chart":{"type":"string"},"namespace":{"type":"string"},"version":{"type":"string"},"values":{"type":"object"},"install":{"type":"boolean"},"wait":{"type":"boolean"},"timeout":{"type":"string"}},"required":["verb","release","chart"],"additionalProperties":false}`),
+	"rollback":   json.RawMessage(`{"type":"object","properties":{"verb":{"const":"rollback"},"release":{"type":"string"},"revision":{"type":"integer","minimum":1},"namespace":{"type":"string"},"wait":{"type":"boolean"},"timeout":{"type":"string"}},"required":["verb","release","revision"],"additionalProperties":false}`),
+	"uninstall":  json.RawMessage(`{"type":"object","properties":{"verb":{"const":"uninstall"},"release":{"type":"string"},"namespace":{"type":"string"},"keep_history":{"type":"boolean"},"wait":{"type":"boolean"},"timeout":{"type":"string"}},"required":["verb","release"],"additionalProperties":false}`),
+	"template":   json.RawMessage(`{"type":"object","properties":{"verb":{"const":"template"},"release":{"type":"string"},"chart":{"type":"string"},"namespace":{"type":"string"},"version":{"type":"string"},"values":{"type":"object"},"include_crds":{"type":"boolean"}},"required":["verb","release","chart"],"additionalProperties":false}`),
 }

@@ -13,8 +13,8 @@ import (
 var _ builtin.Handler = (*Handler)(nil)
 
 type capabilityConfig struct {
-	policy          policy
-	requireApproval bool
+	policy          permissionPolicy
+	requireApproval *bool
 }
 
 type Handler struct {
@@ -35,8 +35,8 @@ type connectionSettings struct {
 
 func (h *Handler) AddCapability(name string, settings Settings) {
 	h.capabilities[name] = capabilityConfig{
-		policy:          newPolicy(settings),
-		requireApproval: requiresApproval(name, settings),
+		policy:          newPermissionPolicy(settings.Permissions),
+		requireApproval: settings.RequireApproval,
 	}
 }
 
@@ -48,27 +48,34 @@ func (h *Handler) Handles(name string) bool {
 func (h *Handler) DispatchCall(ctx context.Context, call dispatcher.Call, auth dispatcher.Authorization) (dispatcher.Outcome, error) {
 	capability, ok := h.capabilities[call.Name]
 	if !ok {
-		return dispatcher.Fail("unknown helm call: " + call.Name), nil
+		return dispatcher.Fail("unknown helm tool: " + call.Name), nil
 	}
-	switch call.Name {
-	case "helm.list":
+	var disc struct {
+		Verb string `json:"verb"`
+	}
+	if err := json.Unmarshal(call.Args, &disc); err != nil {
+		return dispatcher.Fail(fmt.Sprintf("decode verb: %v", err)), nil
+	}
+	verb := strings.ToLower(strings.TrimSpace(disc.Verb))
+	switch verb {
+	case "list":
 		return h.dispatchList(ctx, call, capability)
-	case "helm.status":
+	case "status":
 		return h.dispatchStatus(ctx, call, capability, auth)
-	case "helm.get_values":
+	case "get_values":
 		return h.dispatchGetValues(ctx, call, capability, auth)
-	case "helm.install":
+	case "install":
 		return h.dispatchInstall(ctx, call, capability, auth)
-	case "helm.upgrade":
+	case "upgrade":
 		return h.dispatchUpgrade(ctx, call, capability, auth)
-	case "helm.rollback":
+	case "rollback":
 		return h.dispatchRollback(ctx, call, capability, auth)
-	case "helm.uninstall":
+	case "uninstall":
 		return h.dispatchUninstall(ctx, call, capability, auth)
-	case "helm.template":
+	case "template":
 		return h.dispatchTemplate(ctx, call, capability, auth)
 	default:
-		return dispatcher.Fail("unsupported helm operation: " + call.Name), nil
+		return dispatcher.Fail("unsupported verb: " + disc.Verb), nil
 	}
 }
 
@@ -77,8 +84,8 @@ func (h *Handler) dispatchList(ctx context.Context, call dispatcher.Call, cap ca
 	if outcome := decode(call, &req); outcome != nil {
 		return *outcome, nil
 	}
-	if err := cap.policy.checkNamespace(req.Namespace); err != nil {
-		return dispatcher.Fail(err.Error()), nil
+	if denied := permitRelease(cap, "list", req.Namespace); denied != nil {
+		return *denied, nil
 	}
 	data, err := h.client.List(ctx, req)
 	return jsonClientResult(ctx, data, err)
@@ -92,10 +99,10 @@ func (h *Handler) dispatchStatus(ctx context.Context, call dispatcher.Call, cap 
 	if req.Release == "" {
 		return dispatcher.Fail("release is required"), nil
 	}
-	if err := cap.policy.checkNamespace(req.Namespace); err != nil {
-		return dispatcher.Fail(err.Error()), nil
+	if denied := permitRelease(cap, "status", req.Namespace); denied != nil {
+		return *denied, nil
 	}
-	if outcome := approval(auth, cap, fmt.Sprintf("helm.status %s in %s", req.Release, req.Namespace)); outcome != nil {
+	if outcome := approval(auth, cap, "status", fmt.Sprintf("status %s in %s", req.Release, req.Namespace)); outcome != nil {
 		return *outcome, nil
 	}
 	data, err := h.client.Status(ctx, req)
@@ -110,10 +117,10 @@ func (h *Handler) dispatchGetValues(ctx context.Context, call dispatcher.Call, c
 	if req.Release == "" {
 		return dispatcher.Fail("release is required"), nil
 	}
-	if err := cap.policy.checkNamespace(req.Namespace); err != nil {
-		return dispatcher.Fail(err.Error()), nil
+	if denied := permitRelease(cap, "get_values", req.Namespace); denied != nil {
+		return *denied, nil
 	}
-	if outcome := approval(auth, cap, fmt.Sprintf("helm.get_values %s in %s", req.Release, req.Namespace)); outcome != nil {
+	if outcome := approval(auth, cap, "get_values", fmt.Sprintf("get_values %s in %s", req.Release, req.Namespace)); outcome != nil {
 		return *outcome, nil
 	}
 	data, err := h.client.GetValues(ctx, req)
@@ -125,10 +132,10 @@ func (h *Handler) dispatchInstall(ctx context.Context, call dispatcher.Call, cap
 	if outcome := decode(call, &req); outcome != nil {
 		return *outcome, nil
 	}
-	if outcome := validateReleaseChart(cap, req.Release, req.Chart, req.Namespace); outcome != nil {
+	if outcome := validateReleaseChart(cap, "install", req.Release, req.Chart, req.Namespace); outcome != nil {
 		return *outcome, nil
 	}
-	if outcome := approval(auth, cap, fmt.Sprintf("helm.install %s from %s in %s", req.Release, req.Chart, req.Namespace)); outcome != nil {
+	if outcome := approval(auth, cap, "install", fmt.Sprintf("install %s from %s in %s", req.Release, req.Chart, req.Namespace)); outcome != nil {
 		return *outcome, nil
 	}
 	data, err := h.client.Install(ctx, req)
@@ -140,10 +147,10 @@ func (h *Handler) dispatchUpgrade(ctx context.Context, call dispatcher.Call, cap
 	if outcome := decode(call, &req); outcome != nil {
 		return *outcome, nil
 	}
-	if outcome := validateReleaseChart(cap, req.Release, req.Chart, req.Namespace); outcome != nil {
+	if outcome := validateReleaseChart(cap, "upgrade", req.Release, req.Chart, req.Namespace); outcome != nil {
 		return *outcome, nil
 	}
-	if outcome := approval(auth, cap, fmt.Sprintf("helm.upgrade %s from %s in %s", req.Release, req.Chart, req.Namespace)); outcome != nil {
+	if outcome := approval(auth, cap, "upgrade", fmt.Sprintf("upgrade %s from %s in %s", req.Release, req.Chart, req.Namespace)); outcome != nil {
 		return *outcome, nil
 	}
 	data, err := h.client.Upgrade(ctx, req)
@@ -158,10 +165,10 @@ func (h *Handler) dispatchRollback(ctx context.Context, call dispatcher.Call, ca
 	if req.Release == "" || req.Revision < 1 {
 		return dispatcher.Fail("release and a positive revision are required"), nil
 	}
-	if err := cap.policy.checkNamespace(req.Namespace); err != nil {
-		return dispatcher.Fail(err.Error()), nil
+	if denied := permitRelease(cap, "rollback", req.Namespace); denied != nil {
+		return *denied, nil
 	}
-	if outcome := approval(auth, cap, fmt.Sprintf("helm.rollback %s to revision %d in %s", req.Release, req.Revision, req.Namespace)); outcome != nil {
+	if outcome := approval(auth, cap, "rollback", fmt.Sprintf("rollback %s to revision %d in %s", req.Release, req.Revision, req.Namespace)); outcome != nil {
 		return *outcome, nil
 	}
 	output, err := h.client.Rollback(ctx, req)
@@ -176,10 +183,10 @@ func (h *Handler) dispatchUninstall(ctx context.Context, call dispatcher.Call, c
 	if req.Release == "" {
 		return dispatcher.Fail("release is required"), nil
 	}
-	if err := cap.policy.checkNamespace(req.Namespace); err != nil {
-		return dispatcher.Fail(err.Error()), nil
+	if denied := permitRelease(cap, "uninstall", req.Namespace); denied != nil {
+		return *denied, nil
 	}
-	if outcome := approval(auth, cap, fmt.Sprintf("helm.uninstall %s in %s", req.Release, req.Namespace)); outcome != nil {
+	if outcome := approval(auth, cap, "uninstall", fmt.Sprintf("uninstall %s in %s", req.Release, req.Namespace)); outcome != nil {
 		return *outcome, nil
 	}
 	output, err := h.client.Uninstall(ctx, req)
@@ -191,10 +198,10 @@ func (h *Handler) dispatchTemplate(ctx context.Context, call dispatcher.Call, ca
 	if outcome := decode(call, &req); outcome != nil {
 		return *outcome, nil
 	}
-	if outcome := validateReleaseChart(cap, req.Release, req.Chart, req.Namespace); outcome != nil {
+	if outcome := validateReleaseChart(cap, "template", req.Release, req.Chart, req.Namespace); outcome != nil {
 		return *outcome, nil
 	}
-	if outcome := approval(auth, cap, fmt.Sprintf("helm.template %s from %s in %s", req.Release, req.Chart, req.Namespace)); outcome != nil {
+	if outcome := approval(auth, cap, "template", fmt.Sprintf("template %s from %s in %s", req.Release, req.Chart, req.Namespace)); outcome != nil {
 		return *outcome, nil
 	}
 	output, err := h.client.Template(ctx, req)
@@ -209,24 +216,30 @@ func decode(call dispatcher.Call, target any) *dispatcher.Outcome {
 	return nil
 }
 
-func validateReleaseChart(cap capabilityConfig, release, chart, namespace string) *dispatcher.Outcome {
+// permitRelease gates a release-only verb (resource/chart not applicable).
+func permitRelease(cap capabilityConfig, verb, namespace string) *dispatcher.Outcome {
+	if cap.policy.allowsRelease(verb, namespace) {
+		return nil
+	}
+	out := dispatcher.Fail(fmt.Sprintf("not permitted: %s in namespace %q", verb, namespace))
+	return &out
+}
+
+// validateReleaseChart requires release+chart and gates a chart-bearing verb.
+func validateReleaseChart(cap capabilityConfig, verb, release, chart, namespace string) *dispatcher.Outcome {
 	if release == "" || chart == "" {
 		outcome := dispatcher.Fail("release and chart are required")
 		return &outcome
 	}
-	if err := cap.policy.checkNamespace(namespace); err != nil {
-		outcome := dispatcher.Fail(err.Error())
-		return &outcome
-	}
-	if err := cap.policy.checkChart(chart); err != nil {
-		outcome := dispatcher.Fail(err.Error())
+	if !cap.policy.allowsChart(verb, chart, namespace) {
+		outcome := dispatcher.Fail(fmt.Sprintf("not permitted: %s chart %q in namespace %q", verb, chart, namespace))
 		return &outcome
 	}
 	return nil
 }
 
-func approval(auth dispatcher.Authorization, cap capabilityConfig, summary string) *dispatcher.Outcome {
-	if !cap.requireApproval {
+func approval(auth dispatcher.Authorization, cap capabilityConfig, verb, summary string) *dispatcher.Outcome {
+	if !requiresApproval(verb, cap.requireApproval) {
 		return nil
 	}
 	if auth.Decision == dispatcher.Approved {
